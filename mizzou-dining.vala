@@ -8,11 +8,15 @@ using Json;
 
 public class MizzouDining : Gtk.Application {
     private Gtk.ApplicationWindow window;
-    private Gtk.Stack main_stack;
-    private Gtk.ListBox location_list;
-    private Gtk.Stack menu_stack;
-    private Gtk.Label status_label;
+    private Gtk.Grid main_grid;
     private MenuCache cache;
+    
+    // Store grid column for each URL
+    private Gee.HashMap<string, int> url_to_column;
+    
+    // Settings
+    private double font_scale = 1.3;  // Default larger font
+    private bool show_all_days = true;
     
     private const string[] DINING_LOCATIONS = {
         "The MARK on 5th Street|https://dining.missouri.edu/locations/the-mark-on-5th-street/",
@@ -37,110 +41,157 @@ public class MizzouDining : Gtk.Application {
         build_ui();
         window.present();
         
-        // Load cached menus initially
-        load_cached_menus();
+        // Auto-fetch all menus on startup
+        refresh_all_menus();
     }
     
     private void build_ui() {
+        url_to_column = new Gee.HashMap<string, int>();
+        
+        // Load custom CSS
+        var css_provider = new Gtk.CssProvider();
+        try {
+            css_provider.load_from_resource("/edu/missouri/dining/mizzou-dining.css");
+            Gtk.StyleContext.add_provider_for_screen(
+                Gdk.Screen.get_default(),
+                css_provider,
+                Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+            );
+        } catch (Error e) {
+            warning("Failed to load CSS: %s", e.message);
+        }
+        
         window = new Gtk.ApplicationWindow(this);
         window.title = "Mizzou Dining Menus";
-        window.default_width = 900;
-        window.default_height = 700;
+        window.default_width = 1400;
+        window.default_height = 900;
         
         var header_bar = new Gtk.HeaderBar();
         header_bar.show_close_button = true;
-        header_bar.title = "Mizzou Dining";
+        header_bar.title = "Mizzou Dining Menus";
         
         var refresh_button = new Gtk.Button.from_icon_name("view-refresh-symbolic", Gtk.IconSize.BUTTON);
         refresh_button.tooltip_text = "Refresh all menus";
         refresh_button.clicked.connect(refresh_all_menus);
         header_bar.pack_start(refresh_button);
         
+        var settings_button = new Gtk.Button.from_icon_name("preferences-system-symbolic", Gtk.IconSize.BUTTON);
+        settings_button.tooltip_text = "Settings";
+        settings_button.clicked.connect(show_settings_dialog);
+        header_bar.pack_end(settings_button);
+        
         window.set_titlebar(header_bar);
         
-        var paned = new Gtk.Paned(Gtk.Orientation.HORIZONTAL);
+        // Main scrolled window - single scrollbar for all columns
+        var main_scrolled = new Gtk.ScrolledWindow(null, null);
+        main_scrolled.hscrollbar_policy = Gtk.PolicyType.NEVER;
+        main_scrolled.vscrollbar_policy = Gtk.PolicyType.AUTOMATIC;
         
-        // Left sidebar with location list
-        var sidebar_box = new Gtk.Box(Gtk.Orientation.VERTICAL, 0);
-        sidebar_box.set_size_request(250, -1);
+        // Grid layout: 3 columns (locations) x rows (days/meals)
+        main_grid = new Gtk.Grid();
+        main_grid.column_spacing = 20;
+        main_grid.row_spacing = 15;
+        main_grid.margin = 20;
+        main_grid.column_homogeneous = true;
         
-        var sidebar_label = new Gtk.Label("Dining Locations");
-        sidebar_label.get_style_context().add_class("title");
-        sidebar_label.margin = 12;
-        sidebar_box.pack_start(sidebar_label, false, false, 0);
+        // Column headers (location names)
+        var locations = new string[] {
+            "The MARK on 5th Street",
+            "The Restaurants at Southwest", 
+            "Plaza 900 Dining"
+        };
         
-        var scrolled_locations = new Gtk.ScrolledWindow(null, null);
-        scrolled_locations.hscrollbar_policy = Gtk.PolicyType.NEVER;
-        
-        location_list = new Gtk.ListBox();
-        location_list.selection_mode = Gtk.SelectionMode.SINGLE;
-        location_list.row_selected.connect(on_location_selected);
-        
-        foreach (var location in DINING_LOCATIONS) {
-            var parts = location.split("|");
-            var row = new LocationRow(parts[0], parts[1]);
-            location_list.add(row);
+        for (int col = 0; col < 3; col++) {
+            var header = new Gtk.Label(locations[col]);
+            var attrs = new Pango.AttrList();
+            attrs.insert(Pango.attr_weight_new(Pango.Weight.BOLD));
+            attrs.insert(Pango.attr_scale_new(1.6 * font_scale));
+            header.set_attributes(attrs);
+            header.margin_bottom = 15;
+            main_grid.attach(header, col, 0, 1, 1);
         }
         
-        scrolled_locations.add(location_list);
-        sidebar_box.pack_start(scrolled_locations, true, true, 0);
+        // Create placeholder boxes for each location's content
+        for (int col = 0; col < 3; col++) {
+            var parts = DINING_LOCATIONS[col].split("|");
+            var url = parts[1];
+            
+            // Map URL to column
+            url_to_column.set(url, col);
+            
+            var content_box = new Gtk.Box(Gtk.Orientation.VERTICAL, 10);
+            var loading_label = new Gtk.Label("Loading menu...");
+            content_box.pack_start(loading_label, false, false, 0);
+            
+            main_grid.attach(content_box, col, 1, 1, 1);
+        }
         
-        paned.pack1(sidebar_box, false, false);
-        
-        // Right side with menu display
-        var content_box = new Gtk.Box(Gtk.Orientation.VERTICAL, 0);
-        
-        status_label = new Gtk.Label("Select a location to view menus");
-        status_label.margin = 12;
-        content_box.pack_start(status_label, false, false, 0);
-        
-        menu_stack = new Gtk.Stack();
-        menu_stack.transition_type = Gtk.StackTransitionType.CROSSFADE;
-        
-        content_box.pack_start(menu_stack, true, true, 0);
-        
-        paned.pack2(content_box, true, false);
-        
-        window.add(paned);
+        main_scrolled.add(main_grid);
+        window.add(main_scrolled);
         window.show_all();
     }
     
-    private void on_location_selected(Gtk.ListBoxRow? row) {
-        if (row == null) return;
+    private void show_settings_dialog() {
+        var dialog = new Gtk.Dialog.with_buttons(
+            "Settings",
+            window,
+            Gtk.DialogFlags.MODAL | Gtk.DialogFlags.DESTROY_WITH_PARENT,
+            "Close", Gtk.ResponseType.CLOSE
+        );
         
-        var location_row = row as LocationRow;
-        if (location_row == null) return;
+        dialog.set_default_size(400, 250);
         
-        status_label.label = location_row.location_name;
+        var content = dialog.get_content_area();
+        content.margin = 20;
+        content.spacing = 15;
         
-        var cached_menu = cache.get_menu(location_row.url);
-        if (cached_menu != null) {
-            display_menu(location_row.location_name, cached_menu);
-        } else {
-            fetch_menu(location_row.location_name, location_row.url);
-        }
-    }
-    
-    private void load_cached_menus() {
-        // Silently load cached menus in background
-        foreach (var location in DINING_LOCATIONS) {
-            var parts = location.split("|");
-            var cached = cache.get_menu(parts[1]);
-            if (cached == null) {
-                fetch_menu_silent(parts[0], parts[1]);
-            }
-        }
+        // Font size setting
+        var font_box = new Gtk.Box(Gtk.Orientation.HORIZONTAL, 10);
+        var font_label = new Gtk.Label("Font Size:");
+        font_label.halign = Gtk.Align.START;
+        font_label.width_chars = 15;
+        
+        var font_scale_adj = new Gtk.Adjustment(font_scale, 1.0, 2.5, 0.1, 0.5, 0);
+        var font_scale_spin = new Gtk.SpinButton(font_scale_adj, 0.1, 1);
+        
+        font_box.pack_start(font_label, false, false, 0);
+        font_box.pack_start(font_scale_spin, true, true, 0);
+        content.pack_start(font_box, false, false, 0);
+        
+        // Show all days toggle
+        var days_box = new Gtk.Box(Gtk.Orientation.HORIZONTAL, 10);
+        var days_label = new Gtk.Label("Show All Days:");
+        days_label.halign = Gtk.Align.START;
+        days_label.width_chars = 15;
+        
+        var days_switch = new Gtk.Switch();
+        days_switch.active = show_all_days;
+        days_switch.halign = Gtk.Align.START;
+        
+        days_box.pack_start(days_label, false, false, 0);
+        days_box.pack_start(days_switch, false, false, 0);
+        content.pack_start(days_box, false, false, 0);
+        
+        // Apply button
+        var apply_button = new Gtk.Button.with_label("Apply Changes");
+        apply_button.clicked.connect(() => {
+            font_scale = font_scale_spin.get_value();
+            show_all_days = days_switch.active;
+            refresh_all_menus();
+            dialog.response(Gtk.ResponseType.CLOSE);
+        });
+        content.pack_start(apply_button, false, false, 0);
+        
+        dialog.show_all();
+        dialog.run();
+        dialog.destroy();
     }
     
     private void refresh_all_menus() {
-        status_label.label = "Refreshing menus...";
-        
         foreach (var location in DINING_LOCATIONS) {
             var parts = location.split("|");
             fetch_menu_silent(parts[0], parts[1]);
         }
-        
-        status_label.label = "Menus refreshed";
     }
     
     private void fetch_menu_silent(string name, string url) {
@@ -152,25 +203,9 @@ public class MizzouDining : Gtk.Application {
                 var html = (string) msg.response_body.data;
                 var menu_data = parse_menu_html(html);
                 cache.save_menu(url, menu_data);
-            }
-        });
-    }
-    
-    private void fetch_menu(string name, string url) {
-        status_label.label = "Fetching menu for " + name + "...";
-        
-        var session = new Soup.Session();
-        var message = new Soup.Message("GET", url);
-        
-        session.queue_message(message, (sess, msg) => {
-            if (msg.status_code == 200) {
-                var html = (string) msg.response_body.data;
-                var menu_data = parse_menu_html(html);
-                cache.save_menu(url, menu_data);
-                display_menu(name, menu_data);
-                status_label.label = name;
-            } else {
-                status_label.label = "Failed to fetch menu for " + name;
+                
+                // Always display the menu when it arrives
+                display_menu(name, menu_data, url);
             }
         });
     }
@@ -321,83 +356,112 @@ public class MizzouDining : Gtk.Application {
         return text.substring(start, end - start);
     }
     
-    private void display_menu(string location_name, MenuData menu_data) {
-        var menu_widget = menu_stack.get_child_by_name(location_name);
-        
-        if (menu_widget == null) {
-            menu_widget = create_menu_widget(menu_data);
-            menu_stack.add_named(menu_widget, location_name);
-        } else {
-            // Update existing widget
-            menu_stack.remove(menu_widget);
-            menu_widget = create_menu_widget(menu_data);
-            menu_stack.add_named(menu_widget, location_name);
+    private void display_menu(string location_name, MenuData menu_data, string url) {
+        // Get the column for this URL
+        if (!url_to_column.has_key(url)) {
+            return;
         }
         
-        menu_stack.set_visible_child_name(location_name);
+        int col = url_to_column.get(url);
+        
+        // Remove old widget at this position
+        var old_widget = main_grid.get_child_at(col, 1);
+        if (old_widget != null) {
+            main_grid.remove(old_widget);
+        }
+        
+        // Create and attach new widget
+        var new_widget = create_menu_column(menu_data);
+        main_grid.attach(new_widget, col, 1, 1, 1);
+        main_grid.show_all();
     }
     
-    private Gtk.Widget create_menu_widget(MenuData menu_data) {
-        var scrolled = new Gtk.ScrolledWindow(null, null);
-        var box = new Gtk.Box(Gtk.Orientation.VERTICAL, 12);
-        box.margin = 18;
+    private Gtk.Widget create_menu_column(MenuData menu_data) {
+        var column_box = new Gtk.Box(Gtk.Orientation.VERTICAL, 8);
+        column_box.margin = 10;
+        column_box.valign = Gtk.Align.START; // Force top alignment
+        column_box.vexpand = false;
         
         if (menu_data.days.size == 0) {
             var no_menu = new Gtk.Label("No menu data available");
-            no_menu.get_style_context().add_class("dim-label");
-            box.pack_start(no_menu, false, false, 0);
-        } else {
-            foreach (var day in menu_data.days) {
-                var day_frame = create_day_widget(day);
-                box.pack_start(day_frame, false, false, 0);
+            var attrs = new Pango.AttrList();
+            attrs.insert(Pango.attr_scale_new(font_scale));
+            no_menu.set_attributes(attrs);
+            no_menu.valign = Gtk.Align.START;
+            column_box.pack_start(no_menu, false, false, 0);
+            return column_box;
+        }
+        
+        // Filter days if needed
+        var days_to_show = menu_data.days;
+        if (!show_all_days && menu_data.days.size > 0) {
+            days_to_show = new Gee.ArrayList<DayMenu>();
+            days_to_show.add(menu_data.days[0]); // Only show first day
+        }
+        
+        // Display each day vertically from top
+        foreach (var day in days_to_show) {
+            // Day header
+            var day_label = new Gtk.Label(day.day_name);
+            var day_attrs = new Pango.AttrList();
+            day_attrs.insert(Pango.attr_weight_new(Pango.Weight.BOLD));
+            day_attrs.insert(Pango.attr_scale_new(1.35 * font_scale));
+            day_label.set_attributes(day_attrs);
+            day_label.halign = Gtk.Align.START;
+            day_label.valign = Gtk.Align.START;
+            day_label.margin_top = 5;
+            day_label.margin_bottom = 10;
+            column_box.pack_start(day_label, false, false, 0);
+            
+            // Display meals vertically UNDER this day
+            foreach (var meal in day.meals) {
+                // Meal time header
+                var meal_label = new Gtk.Label(meal.name);
+                var meal_attrs = new Pango.AttrList();
+                meal_attrs.insert(Pango.attr_weight_new(Pango.Weight.BOLD));
+                meal_attrs.insert(Pango.attr_scale_new(1.2 * font_scale));
+                meal_attrs.insert(Pango.attr_foreground_new(61680, 47104, 11520)); // Mizzou Gold
+                meal_label.set_attributes(meal_attrs);
+                meal_label.halign = Gtk.Align.START;
+                meal_label.valign = Gtk.Align.START;
+                meal_label.margin_top = 8;
+                meal_label.margin_start = 5;
+                meal_label.margin_bottom = 4;
+                column_box.pack_start(meal_label, false, false, 0);
+                
+                // Menu items - stacked vertically
+                foreach (var item in meal.items) {
+                    var item_label = new Gtk.Label("• " + item);
+                    var item_attrs = new Pango.AttrList();
+                    item_attrs.insert(Pango.attr_scale_new(1.05 * font_scale));
+                    item_label.set_attributes(item_attrs);
+                    item_label.halign = Gtk.Align.START;
+                    item_label.valign = Gtk.Align.START;
+                    item_label.margin_start = 20;
+                    item_label.margin_top = 1;
+                    item_label.margin_bottom = 1;
+                    item_label.wrap = true;
+                    item_label.xalign = 0;
+                    item_label.max_width_chars = 45;
+                    column_box.pack_start(item_label, false, false, 0);
+                }
+                
+                // Space after each meal
+                var spacer = new Gtk.Label("");
+                spacer.margin_top = 6;
+                column_box.pack_start(spacer, false, false, 0);
+            }
+            
+            // Separator between days
+            if (show_all_days && day != days_to_show[days_to_show.size - 1]) {
+                var separator = new Gtk.Separator(Gtk.Orientation.HORIZONTAL);
+                separator.margin_top = 15;
+                separator.margin_bottom = 15;
+                column_box.pack_start(separator, false, false, 0);
             }
         }
         
-        var timestamp = new Gtk.Label("Last updated: " + menu_data.timestamp.format("%B %d, %Y at %I:%M %p"));
-        timestamp.get_style_context().add_class("dim-label");
-        timestamp.halign = Gtk.Align.END;
-        timestamp.margin_top = 12;
-        box.pack_start(timestamp, false, false, 0);
-        
-        scrolled.add(box);
-        scrolled.show_all();
-        
-        return scrolled;
-    }
-    
-    private Gtk.Widget create_day_widget(DayMenu day) {
-        var frame = new Gtk.Frame(day.day_name);
-        frame.margin = 6;
-        
-        var box = new Gtk.Box(Gtk.Orientation.VERTICAL, 8);
-        box.margin = 12;
-        
-        foreach (var meal in day.meals) {
-            var meal_box = new Gtk.Box(Gtk.Orientation.VERTICAL, 4);
-            
-            var meal_label = new Gtk.Label(meal.name);
-            meal_label.get_style_context().add_class("title");
-            meal_label.halign = Gtk.Align.START;
-            meal_box.pack_start(meal_label, false, false, 0);
-            
-            foreach (var item in meal.items) {
-                var item_label = new Gtk.Label("• " + item);
-                item_label.halign = Gtk.Align.START;
-                item_label.margin_start = 12;
-                item_label.wrap = true;
-                item_label.xalign = 0;
-                meal_box.pack_start(item_label, false, false, 0);
-            }
-            
-            box.pack_start(meal_box, false, false, 0);
-            
-            var separator = new Gtk.Separator(Gtk.Orientation.HORIZONTAL);
-            separator.margin_top = 4;
-            box.pack_start(separator, false, false, 0);
-        }
-        
-        frame.add(box);
-        return frame;
+        return column_box;
     }
     
     public static int main(string[] args) {
@@ -432,24 +496,6 @@ public class Meal {
     
     public Meal() {
         items = new Gee.ArrayList<string>();
-    }
-}
-
-// Location row widget
-public class LocationRow : Gtk.ListBoxRow {
-    public string location_name { get; private set; }
-    public string url { get; private set; }
-    
-    public LocationRow(string name, string location_url) {
-        location_name = name;
-        url = location_url;
-        
-        var label = new Gtk.Label(name);
-        label.halign = Gtk.Align.START;
-        label.margin = 12;
-        label.wrap = true;
-        
-        add(label);
     }
 }
 
@@ -615,7 +661,7 @@ public class MenuCache {
                 );
                 
                 var modified = new DateTime.from_unix_local(
-                    (int64)info.get_attribute_uint64(FileAttribute.TIME_MODIFIED)
+                    (int64) info.get_attribute_uint64(FileAttribute.TIME_MODIFIED)
                 );
                 
                 var days_old = now.difference(modified) / TimeSpan.DAY;
