@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=Mizzou Dining
+Comment=View dining hall menus for University of Missouri
+Exec=@bindir@/mizzou-dining
+Icon=edu.missouri.dining
+Terminal=false
+Type=Application
+Categories=GTK;GNOME;Utility;
+Keywords=mizzou;dining;menu;food;cafeteria;
+StartupNotify=true
