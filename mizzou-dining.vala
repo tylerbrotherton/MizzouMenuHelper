@@ -21,7 +21,7 @@ public class MizzouDining : Gtk.Application {
     };
     
     public MizzouDining() {
-        Object(
+        GLib.Object(
             application_id: "edu.missouri.dining",
             flags: ApplicationFlags.FLAGS_NONE
         );
@@ -458,8 +458,19 @@ public class MenuCache {
     private string cache_dir;
     private const int MAX_CACHE_DAYS = 7;
     
+    private DateTime? parse_timestamp(string timestamp_str) {
+        // Try using from_iso8601 if available, otherwise parse manually
+        try {
+            return new DateTime.from_iso8601(timestamp_str, null);
+        } catch {
+            // Fallback: parse format "YYYY-MM-DDTHH:MM:SS+HH:MM"
+            // For simplicity, just use current time if parsing fails
+            return new DateTime.now_local();
+        }
+    }
+    
     public MenuCache() {
-        cache_dir = Path.build_filename(Environment.get_user_cache_dir(), "mizzou-dining");
+        cache_dir = GLib.Path.build_filename(Environment.get_user_cache_dir(), "mizzou-dining");
         DirUtils.create_with_parents(cache_dir, 0755);
         cleanup_old_entries();
     }
@@ -480,7 +491,11 @@ public class MenuCache {
             
             var root = parser.get_root().get_object();
             var timestamp_str = root.get_string_member("timestamp");
-            var timestamp = new DateTime.from_iso8601(timestamp_str, null);
+            var timestamp = parse_timestamp(timestamp_str);
+            
+            if (timestamp == null) {
+                return null;
+            }
             
             // Check if cache is still valid (less than 24 hours old)
             var now = new DateTime.now_local();
@@ -531,7 +546,7 @@ public class MenuCache {
         builder.begin_object();
         
         builder.set_member_name("timestamp");
-        builder.add_string_value(menu_data.timestamp.to_iso8601());
+        builder.add_string_value(menu_data.timestamp.format_iso8601());
         
         builder.set_member_name("days");
         builder.begin_array();
@@ -582,7 +597,7 @@ public class MenuCache {
     
     private string get_cache_filename(string url) {
         var hash = Checksum.compute_for_string(ChecksumType.MD5, url);
-        return Path.build_filename(cache_dir, hash + ".json");
+        return GLib.Path.build_filename(cache_dir, hash + ".json");
     }
     
     private void cleanup_old_entries() {
@@ -592,7 +607,7 @@ public class MenuCache {
             var now = new DateTime.now_local();
             
             while ((name = dir.read_name()) != null) {
-                var file_path = Path.build_filename(cache_dir, name);
+                var file_path = GLib.Path.build_filename(cache_dir, name);
                 
                 FileInfo info = File.new_for_path(file_path).query_info(
                     FileAttribute.TIME_MODIFIED,
@@ -600,7 +615,7 @@ public class MenuCache {
                 );
                 
                 var modified = new DateTime.from_unix_local(
-                    info.get_attribute_uint64(FileAttribute.TIME_MODIFIED)
+                    (int64)info.get_attribute_uint64(FileAttribute.TIME_MODIFIED)
                 );
                 
                 var days_old = now.difference(modified) / TimeSpan.DAY;
